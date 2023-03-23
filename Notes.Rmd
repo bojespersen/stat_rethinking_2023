@@ -1,0 +1,206 @@
+---
+title: "Statistical Rethinking 23 - Notes"
+author: "Bo Bindzus Jespersen (DKBOBJ)"
+date: '2023-02-15'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(devtools)
+library("rethinking")
+rstan_options(auto_write = TRUE) # To avoid recompilation of unchanged Stan programs
+library("ggdag")
+library(ggplot2)
+```
+
+# Lecture 02: Garden of Forking Data
+
+**sampling method**
+
+Sample from the posterior distribution - e.g. the beta distribution
+
+```{r}
+rbeta(10, 3+1, 6+1) # the +1 is just how the beta distribution in R understands 3 and 6 samples
+```
+
+**Posterior Predictive Distribution**
+
+Future experiment prediction from the posterior: If we took more
+samples, what would happen?
+
+# Lecture 03: Geocentric Models
+
+Workflow:
+
+1.  State a clear question (question/goal/estimand)
+2.  Sketch your casual assumptions (scientific model)
+3.  Use the sketch to define a generative model (statistical models)
+    1.  Test the statistical model with simulated observations
+
+    2.  Strong test: simulation-based calibration
+4.  Use generative model to build estimator (validate model)
+5.  Profit (analyze data)
+    1.  Put real samples in and run!!!
+
+
+*Building the model*
+sigma is a scale parameter because it can scale the other distribution (of a and b in the linear model). It can never be zero and the prior should reflect this e.g. uniform(0,1) - not the best choice
+
+1.    useful to re-scale avriables
+b - the slope - can be described by the logNormal distribution (e^NormalDistribution, mean and sigma are from the normal dist - confusing)
+
+2. think about prior...
+
+*How to do grid approximation for the linear model*
+Consider each combination of a, b and sigma. If you have 100 values it will give you 10^6 combinations for your posterior distribution
+
+*The R-code for grid approximation - 2 variables*
+
+```{r}
+library(rethinking)
+data(Howell1)
+d <- Howell1
+d2 <- d[ d$age >= 18 , ]
+
+## R code 4.16
+mu.list <- seq( from=150, to=160 , length.out=100 )
+sigma.list <- seq( from=7 , to=9 , length.out=100 )
+post <- expand.grid( mu=mu.list , sigma=sigma.list ) # Creates a data frame with all combinations of the vectors
+
+# the probpability of all heights of d2 are multiplied
+# In the log domain summation corresponds to multiplication
+post$LL <- sapply( 1:nrow(post) ,
+                   function(i) sum(dnorm(d2$height , post$mu[i] , post$sigma[i] , log=TRUE)))
+
+# This must be the top of Bayes theorem: P(A|B, C)*P(B)*P(C)
+post$prod <- post$LL + dnorm( post$mu , 178 , 20 , TRUE ) + dunif( post$sigma , 0 , 50 , TRUE )
+
+# Still in log-world, meaning minus is division 
+# This must correspond to dividing by P(B) as per Bayes theorem.
+# purpose is to "normalize".
+# it is centered according to the max value of prod to avoid rounding to zero errors when transforming back from log.
+post$prob <- exp( post$prod - max(post$prod) )
+
+## R code 4.17
+contour_xyz( post$mu , post$sigma , post$prob )
+```
+## splines
+
+*Polynomial functions are bad*: they use global smoothing, meaning that any data point arbitrarily far away can change local smoothing. Also uncertainty is large at the edges.
+
+```{r}
+
+
+## R code 4.19
+sample.rows <- sample( 1:nrow(post) , size=1e4 , replace=TRUE ,
+                       prob=post$prob )
+
+sample.mu <- post$mu[ sample.rows ]
+sample.sigma <- post$sigma[ sample.rows ]
+
+## R code 4.20
+plot( sample.mu , sample.sigma , cex=0.5 , pch=16 , col=col.alpha(rangi2,0.1) )
+
+## R code 4.21
+dens( sample.mu )
+dens( sample.sigma )
+
+## R code 4.22
+PI( sample.mu )
+PI( sample.sigma )
+
+## R code 4.23
+d3 <- sample( d2$height , size=20 )
+
+## R code 4.24
+mu.list <- seq( from=150, to=170 , length.out=200 )
+sigma.list <- seq( from=4 , to=20 , length.out=200 )
+post2 <- expand.grid( mu=mu.list , sigma=sigma.list )
+
+sum( dnorm( d3 , mean=post2$mu[1] , sd=post2$sigma[1] ,
+            log=TRUE ) )
+
+post2$mu[1]
+post2$LL <- sapply( 1:nrow(post2) , function(i)
+  sum( dnorm( d3 , mean=post2$mu[i] , sd=post2$sigma[i] ,
+              log=TRUE ) ) )
+post2$prod <- post2$LL + dnorm( post2$mu , 178 , 20 , TRUE ) +
+  dunif( post2$sigma , 0 , 50 , TRUE )
+post2$prob <- exp( post2$prod - max(post2$prod) )
+sample2.rows <- sample( 1:nrow(post2) , size=1e4 , replace=TRUE ,
+                        prob=post2$prob )
+sample2.mu <- post2$mu[ sample2.rows ]
+sample2.sigma <- post2$sigma[ sample2.rows ]
+plot( sample2.mu , sample2.sigma , cex=0.5 ,
+      col=col.alpha(rangi2,0.1) ,
+      xlab="mu" , ylab="sigma" , pch=16 )
+
+## R code 4.25
+dens( sample2.sigma , norm.comp=TRUE )
+```
+
+
+
+# Lecture 04: Categories and Curves
+
+*Coding variables*
+
+Indicator (dummy) variables : 0/1
+index variables: 1,2,3,4 <- This is what we will use. use fewer columns to say the same.
+
+
+**link** is used to compute values of any linear models over samples from the posterior distribution.
+
+**sim** is used to simulate posterior predictive distributions, simulating outcomes over samples from the posterior distribution of parameters. sim can also be used to simulate prior predictives.
+
+
+# Lecture 05: Elemental Confounds
+
+Estimand: What we are trying to reach
+Estimator: How we do it
+Estimate: the result
+
+1. The fork
+
+X <- Z -> Y
+
+X and Y share a common cause.  
+
+Y ⫫ X | Z (Y is independent of X conditional of Z) .. x and Y are independent processes 
+
+# Lecture 06: Good and Bad Controls
+# Lecture 07: Overfitting
+# Lecture 08: MCMC
+# Lecture 09: Modeling Events
+# Lecture 10: 
+# Lecture 11: 
+# Lecture 12: 
+# Lecture 13: 
+# Lecture 14: 
+# Lecture 15: 
+
+
+
+
+# Week 03:  / 
+
+# Week 04:  / 
+
+# Week 05:  / Counts and Confounds
+
+# Week 06: Ordered Categories / Multilevel Models
+
+# Week 07: Multilevel Adventures / More Multilevel Models
+
+# Week 08: Social networks / Gaussian Processes
+
+# Week 09: Measurement Error / Missing Data
+
+# Week 10: Beyond GLMs: State-space Models, ODEs / Horoscopes

@@ -1,0 +1,272 @@
+---
+title: "Statistical Rethinking 23 - Homework"
+author: "Bo Bindzus Jespersen (DKBOBJ)"
+date: '2023-02-15'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(devtools)
+library("rethinking")
+rstan_options(auto_write = TRUE) # To avoid recompilation of unchanged Stan programs
+library("ggdag")
+library(ggplot2)
+```
+
+# Lecture 02: Garden of Forking Data
+
+1.  Suppose the globe tossing data (Lecture 2, Chapter 2) had turned out
+    to be 4 water and 11 land. Construct the posterior distribution.
+
+```{r}
+sample <- c(rep("W",4),rep("L",11))
+W <- sum(sample=="W")
+L <- sum(sample=="L")
+p <- seq(0,1,0.25)
+ways <- sapply(p, function(q) (4*q)^W * ((1-q)*4)^L)
+prob <- ways/sum(ways)
+cbind(p, ways, prob)
+
+
+curve(dbeta(x, 4+1, 11+1), 
+      xlab = "proportion of water",
+      ylab = "density"
+      )
+
+```
+
+2.  Using the posterior distribution from 1, compute the posterior
+    predictive distribution for the next 5 tosses of the same globe. I
+    recommend you use the sampling method.
+
+```{r}
+n <- 10000
+p_sample <- rbeta(n, 4+1, 11+1)
+w_sim <- rbinom(n, 5, p_sample) # rbinom (# observations, # trails/observation, probability of success )
+# a thousand times we repeat a trial 5 times with a probability of success of p_sample (proportion of water).
+# the number represents the number of globe tosses that results in water for a given sampled proportion of water (p_water)
+plot(table(w_sim)/sum(table(w_sim)))
+```
+
+3.  Use the posterior predictive distribution from 2 to calculate the
+    probability of 3 or more water samples in the next 5 tosses.
+
+```{r}
+sum(w_sim>=3)/n
+```
+
+4-OPTIONAL. This problem is an optional challenge for people who are
+taking the course for a second or third time. Suppose you observe W = 5
+water points, but you forgot to write down how many times the globe was
+tossed, so you don't know the number of land points L. Assume that p =
+0.7 and compute the posterior distribution of the number of tosses N.
+Hint: Use the binomial distribution.
+
+# Lecture 03 & 04: Geocentric Models & Categories and Curves
+
+1.  From the Howell1 dataset, consider only the people younger than 13
+    years old. Estimate the causal association between age and weight.
+    Assume that age influences weight through two paths. First, age
+    influences height, and height influences weight. Second, age
+    directly influences weight through age-related changes in muscle
+    growth and body proportions. Draw the DAG that represents these
+    causal relationships. And then write a generative simulation that
+    takes age as an input and simulates height and weight, obeying the
+    relationships in the DAG.
+    
+```{r fig.height=3}
+# Age influence weight through height
+dagify(Height ~ Age,
+       Weight ~ Height + Age,
+       Weight ~ U,
+       Height ~ U) |> 
+  ggdag() +
+  theme_void()
+  
+```
+
+```{r}
+# Simulating both the direct and indirect influences of weight with uncertanties for both. 
+
+sim_W <- function(A, bAH=5, bHW=0.5, bAW=0.5, sdU=2){
+  n <- length(A)
+  # add rnorm to both H and W
+  # First the indirect influence of H is calculated incl. some uncertainty (rnorm)
+  H = bAH*A+rnorm(n, sd=sdU)
+  # Then the direct influence on W is calculated inlc. some new uncertainty.
+  W = bHW*H + bAW*A + rnorm(n, sd=sdU)
+  return(data.frame(age=A, height=H, weight=W))
+}
+
+sim_W(runif(20,1,12)) |> 
+  pairs()
+```
+
+
+
+2.  Use a linear regression to estimate the total causal effect of each
+    year of growth on weight.
+
+```{r}
+A <- seq(1,20,0.5)
+sim_W(A=A, bAH = 0.5, bHW = 0.5, bAW = 0.5, sdU=5)
+
+data(Howell1)
+h <- Howell1[Howell1$age<13,]  # Only kids yonger than 13 are included
+
+
+sim1 <- sim_W(A=h$age) # simulating weight based on height from dataset (based on priors)
+
+with(sim1, plot(age, height))
+
+# Quadratic approximation of height on weight
+m1 <- quap(
+  alist(
+    # The order is EXTREMELY important!!!!
+    W ~ dnorm(mu, sigma),
+    mu <- a + b*A,
+    a ~ dnorm(0, 10),
+    b ~ dunif(0,5),
+    sigma ~ dexp(1) #????? why exp???
+  ),
+  data = list(
+    A=h$age,
+    W=h$weight 
+    )
+)
+
+# b is the casual relationship
+precis(m1)
+```
+
+
+3. Now suppose the causal association between age and weight might be
+different for boys and girls. Use a single linear regression, with a
+categorical variable for sex, to estimate the total causal effect of age
+on weight separately for boys and girls. How do girls and boys differ?
+Provide one or more posterior contrasts as a summary.
+
+```{r fig.height=3}
+# Age influence weight through height
+dagify(Height ~ Age,
+       Weight ~ Height + Age,
+       Weight ~ Sex,
+       Height ~ Sex) |> 
+  ggdag() +
+  theme_void()
+  
+```
+
+
+
+
+```{r}
+m2 <- quap(
+  alist(
+    W ~ dnorm(mu, sigma),
+    mu <- a[S] + b[S]*A,
+    a[S] ~ dnorm(0, 10),
+    b[S] ~ dunif(1,5),
+    sigma ~ dexp(1)
+  ),
+  data = list(
+    A = h$age,
+    W = h$weight,
+    S = h$male+1
+  )
+)
+
+precis(m2, depth=2)
+
+# The posterior of the intercept (a) for boys and girls:
+post <- extract.samples(m2)
+
+# Drawing random variables from the posterior 
+post1 <- rnorm(1000, post$a[,1], post$sigma)
+post2 <- rnorm(1000, post$a[,2], post$sigma)
+
+# plotting posteriors
+dens(post1, col=2, main="Posterior for the intercept")
+dens(post2, add = T, col=4)
+```
+
+
+
+
+```{r}
+age <- 0:13
+
+# link is used to compute values of any linear models over samples from the posterior distribution. 
+link1 <- link(m2, data=list(A=age, S=rep(1,14)))
+link2 <- link(m2, data=list(A=age, S=rep(2,14)))
+
+plot( NULL , xlim=c(0,13) , ylim=c(5,25), xlab="age", ylab="weight")
+points(x=h$age[h$sex==1],y=h$weight[h$sex==1], col=2)
+points(x=h$age[h$sex==2],y=h$weight[h$sex==2], col=4)
+shade(apply(link1,2,PI,prob=0.89), age)
+shade(apply(link2,2,PI,prob=0.89), age)
+abline(a = 7.04, b = 1.29, col=2)
+abline(a = 7.87, b = 1.39, col=4)
+```
+
+Plotting the contrast difference of weight between boys and girls.
+
+```{r}
+# age interval for simulating "people" using the model
+age <- 0:13
+
+# sim is used to simulate posterior predictive distributions, simulating outcomes over samples from the posterior distribution of parameters.
+# Simulating the weight. The Average weight can be simulated using link function
+girlsSim <- sim(m2, data=list(A=age, S=rep(1,14)))
+boysSim <- sim(m2, data=list(A=age, S=rep(2,14)))
+
+contrast <- boysSim-girlsSim
+
+plot( NULL , xlim=c(0,13) , ylim=c(-15,15) , xlab="age" ,
+ylab="weight difference (boys-girls)" )
+for ( p in c(0.5,0.67,0.89,0.99) )
+shade( apply(contrast,2,PI,prob=p) , age )
+abline(h=0, lty=2)
+abline(a = 7.87-7.04, b = 1.39-1.29)
+```
+
+
+
+
+# Lecture 05: Elemental Confounds
+# Lecture 06: Good and Bad Controls
+# Lecture 07: Overfitting
+# Lecture 08: MCMC
+# Lecture 09: Modeling Events
+# Lecture 10: 
+# Lecture 11: 
+# Lecture 12: 
+# Lecture 13: 
+# Lecture 14: 
+# Lecture 15: 
+
+
+
+
+# Week 03:  / 
+
+# Week 04:  / 
+
+# Week 05:  / Counts and Confounds
+
+# Week 06: Ordered Categories / Multilevel Models
+
+# Week 07: Multilevel Adventures / More Multilevel Models
+
+# Week 08: Social networks / Gaussian Processes
+
+# Week 09: Measurement Error / Missing Data
+
+# Week 10: Beyond GLMs: State-space Models, ODEs / Horoscopes
